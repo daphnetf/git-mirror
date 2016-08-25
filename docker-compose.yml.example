@@ -4,7 +4,7 @@ main:
   volumes:
   - ./files/run.py:/usr/bin/run.py:ro
   - ./keys/:/keys:ro
-  env:
+  environment:
   - 'MIRRORS=[{
         "source":{
             "url":"blah@github.com/blah/program.git"
