@@ -5,3 +5,5 @@
 *.swn
 *.pyc
 __pycache__
+/keys/
+
