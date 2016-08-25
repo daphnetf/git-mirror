@@ -324,10 +324,11 @@ class Remote(object):
 
     def pull(self, lfs=False, branch="master"):
         self._run_authed_git_command(["pull", self.name, branch])
-        self._run_authed_git_command(["pull", self.name],
-            binary="git-lfs")
+        if self.repo.lfs:
+            self._run_authed_git_command(["pull", self.name],
+                binary="git-lfs")
 
-    def push(self, directory, branch="master"):
+    def push(self, branch="master"):
         self._run_authed_git_command(["pull", self.name, branch])
 
 class LocalRepo(object):
@@ -407,25 +408,29 @@ class Mirror(object):
                 try:
                     if verbose:
                         print("verbose: " + str(self.mirror) +
-                            ": pulling from source...")
+                            ": pulling from source...",
+                            file=sys.stderr, flush=True)
                     self.mirror.repo.remotes["source"].pull()
-                    if (self.mirror._last_known_hash == None or
+                    if (self.mirror._last_known_hash != None and
                             self.mirror.repo.head() ==
                                 self.mirror._last_known_hash):
                         if verbose:
                             print("verbose: " + str(self.mirror) +
-                                ": nothing to update, no new commit.")
+                                ": nothing to update, no new commit.",
+                                file=sys.stderr, flush=True)
                         # Nothing to forward.
                         return
                     self.mirror._last_known_hash = self.mirror.repo.head()
                     if verbose:
                         print("verbose: " + str(self.mirror) +
-                            ": pushing to target...")
+                            ": pushing to target...",
+                            file=sys.stderr, flush=True)
 
                     self.mirror.repo.remotes["target"].push()
                     if verbose:
                         print("verbose: " + str(self.mirror) +
-                            ": thread work done.")
+                            ": thread work done.",
+                            file=sys.stderr, fluhs=True)
                 except Exception as e:
                     self.error = e
 
