@@ -1,0 +1,7 @@
+/docker-compose.yml
+*~
+*.swp
+*.swo
+*.swn
+*.pyc
+__pycache__

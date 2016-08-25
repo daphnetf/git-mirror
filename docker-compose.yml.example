@@ -1,0 +1,22 @@
+
+main:
+  build: .
+  volumes:
+  - ./files/run.py:/usr/bin/run.py:ro
+  - ./keys/:/keys:ro
+  env:
+  - 'MIRRORS=[{
+        "source":{
+            "url":"blah@github.com/blah/program.git"
+            "auth":{"type":"anonymous"}
+        },
+        "target":{
+            "url":
+                "blah@mypersonal.gitlab.example/blah/program-mirror.git",
+                "auth":{
+                    "type":"public_key",
+                    "info":{"key_file":"/keys/my_key.pub"}
+                }
+            }
+        }
+    }]'
