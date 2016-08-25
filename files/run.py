@@ -40,7 +40,7 @@ class Remote(object):
         if not "type" in self.auth:
             raise RuntimeError("invalid auth info: no \"type\" specified")
         if self.auth["type"] == "anonymous":
-            
+            subprocess.check_output(
 
         elif self.auth["type"] == "public_key":
             raise RuntimeError("not implemented yet")
@@ -57,4 +57,6 @@ class LocalRepo(object):
             ["git", "rev-parse", "HEAD"],
             cwd=self.repo_dir)
 
-    def
+    def 
+
+

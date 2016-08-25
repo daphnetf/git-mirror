@@ -14,8 +14,11 @@ main:
             "url":
                 "blah@mypersonal.gitlab.example/blah/program-mirror.git",
                 "auth":{
-                    "type":"public_key",
-                    "info":{"key_file":"/keys/my_key.pub"}
+                    "type":"key_file",
+                    "info":{
+                        "public_key":"/keys/my_key.pub",
+                        "private_key":"/keys/my_key"
+                    }
                 }
             }
         }
