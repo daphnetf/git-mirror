@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 
-# Copyright (c) 2016, University of Freiburg, Chair of Algorithms and Data
-#                     Structures.
+# Copyright (c) 2016, University of Freiburg,
+# Chair of Algorithms and Data Structures.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
