@@ -1,6 +1,6 @@
 
 main:
-  build: .
+  build: ./context/
   volumes:
   - ./files/run.py:/usr/bin/run.py:ro
   - ./keys/:/keys:ro

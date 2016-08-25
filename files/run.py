@@ -33,10 +33,13 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
 import yaml
+
+verbose = True
 
 class SubprocessHelper(object):
     """ A helper class to provide various advanced functions which the
@@ -247,28 +250,33 @@ class Remote(object):
         self.url = url
         if self.url.startswith("scp://") or self.url.startswith("ssh://"):
             self.url = self.url.partition("//")[2]
-        self.auth = auth
+        self.auth = auth_info
         self.name = name
-        self.repo = repo
 
     def set_repo(self, repo):
         self.repo = repo
-        remote_list_output = subprocess.check_output(["git remote"],
+        remote_list_output = subprocess.check_output(["git", "remote"],
             cwd=self.repo.repo_dir)
-        lines = [line.strip() for line in remote_list_output.replace(
-            "\r\n", "\n").split("\n") if len(line.strip()) > 0]
+        lines = [line.strip().decode("utf-8", "replace")\
+            for line in remote_list_output.replace(
+            b"\r\n", b"\n").split(b"\n") if len(line.strip()) > 0]
         remotes = [line.partition(" ")[0] for line in lines]
         if self.name in remotes:
             # Nothing to do, remote was already added.
             return
-        subprocess.call(["git", "remote", "add", self.name,
-            self.url])
+        subprocess.check_output(["git", "remote", "add", self.name,
+            self.url], cwd=self.repo.repo_dir)
+        subprocess.check_output(["git", "remote", "update"],
+            cwd=self.repo.repo_dir)
 
     def _run_authed_git_command(self, command, binary="git"):
+        if verbose:
+            print("verbose: shell cmd: " + str([binary] + command),
+                file=sys.stderr, flush=True)
         if not "type" in self.auth:
             raise RuntimeError("invalid auth info: no \"type\" specified")
         if self.auth["type"] == "anonymous":
-            output = subprocess.check_output(["git"] + command,
+            output = subprocess.check_output([binary] + command,
                 cwd=self.repo.repo_dir)
             return output
         elif self.auth["type"] == "password":
@@ -276,7 +284,7 @@ class Remote(object):
                 raise RuntimeError("invalid auth info: password auth " +
                     "requires \"info\" entry with \"password\" specified " +
                     "inside")
-            if not type(self.auth["info"] == dict:
+            if not type(self.auth["info"]) == dict:
                 raise RuntimeError("invalid auth info: \"info\" " +
                     "entry not a dictionary as expected")
             if not "password" in self.auth["info"]:
@@ -316,21 +324,26 @@ class Remote(object):
 
     def pull(self, lfs=False, branch="master"):
         self._run_authed_git_command(["pull", self.name, branch])
-        self._run_authed_git_command(["pull"],
+        self._run_authed_git_command(["pull", self.name],
             binary="git-lfs")
 
     def push(self, directory, branch="master"):
         self._run_authed_git_command(["pull", self.name, branch])
 
 class LocalRepo(object):
-    def __init__(self, repo_dir=None):
+    def __init__(self, repo_dir=None, lfs=True):
         if repo_dir == None:
             repo_dir = tempfile.mkdtemp(prefix="git-mirror-temp-repo-")
         self.repo_dir = repo_dir
         self.remotes = dict()
+        self.lfs = lfs
         if not os.path.exists(os.path.join(self.repo_dir, ".git")):
             subprocess.check_output(["git", "init", "."],
                 cwd=self.repo_dir)
+            if self.lfs:
+                subprocess.check_output(["git", "lfs", "install",
+                    "--skip-smudge"],
+                    cwd=self.repo_dir)
 
     def head(self):
         return subprocess.check_output(
@@ -338,60 +351,111 @@ class LocalRepo(object):
             cwd=self.repo_dir).strip()
 
     def add_remote(self, remote):
-        if remote.name in self:
+        if remote.name in self.remotes:
             raise RuntimeError("there is already a remote named '" +
                 remote.name + "'")
         remote.set_repo(self)
-        self.remote[remote.name] = remote
+        self.remotes[remote.name] = remote
 
 class Mirror(object):
     def __init__(self, settings):
+        self._last_known_hash = None
         self.settings = settings
         if not "source" in self.settings:
             raise RuntimeError("'source' key missing in mirror settings")
         if not "target" in self.settings:
             raise RuntimeError("'source' key missing in mirror settings")
-        self.repo = LocalRepo()
+        if verbose:
+            print("verbose: " + str(self) + ": initializing local repo...",
+                file=sys.stderr, flush=True)
+
+        use_lfs = False
+        if "lfs" in self.settings:
+            if self.settings["lfs"]:
+                use_lfs = True
+        self.repo = LocalRepo(lfs=use_lfs)
+
+        if verbose:
+            print("verbose: " + str(self) + ": adding source remote...",
+                file=sys.stderr, flush=True)
         self.repo.add_remote(Remote(self.settings["source"]["url"],
             self.settings["source"]["auth"], "source"))
+        if verbose:
+            print("verbose: " + str(self) + ": adding target remote...",
+                file=sys.stderr, flush=True)
         self.repo.add_remote(Remote(self.settings["target"]["url"],
             self.settings["target"]["auth"], "target"))
-        self._last_known_hash = None
+
+    def __repr__(self):
+        if hasattr(self, "settings"):
+            return "<Mirror " + str(self.settings["source"]["url"]
+                ) + " -> " + str(
+                self.settings["target"]["url"]) + ">"
+        return super().__repr__()
+
+    def __str__(self):
+        return self.__repr__()
 
     def update(self):
         class UpdateThread(threading.Thread):
             def __init__(self, mirror):
+                super().__init__()
                 self.mirror = mirror
+                self.error = None
 
             def run(self):
-                self.mirror.repo.remotes["source"].pull()
-                if (self._last_known_hash == None or
-                        self.mirror.repo.head() == self._last_known_hash):
-                    # Nothing to forward.
-                    return
-                self.mirror.repo.remotes["target"].push()
+                try:
+                    if verbose:
+                        print("verbose: " + str(self.mirror) +
+                            ": pulling from source...")
+                    self.mirror.repo.remotes["source"].pull()
+                    if (self.mirror._last_known_hash == None or
+                            self.mirror.repo.head() ==
+                                self.mirror._last_known_hash):
+                        if verbose:
+                            print("verbose: " + str(self.mirror) +
+                                ": nothing to update, no new commit.")
+                        # Nothing to forward.
+                        return
+                    self.mirror._last_known_hash = self.mirror.repo.head()
+                    if verbose:
+                        print("verbose: " + str(self.mirror) +
+                            ": pushing to target...")
 
-        task = UpdateThread()
+                    self.mirror.repo.remotes["target"].push()
+                    if verbose:
+                        print("verbose: " + str(self.mirror) +
+                            ": thread work done.")
+                except Exception as e:
+                    self.error = e
+
+        task = UpdateThread(self)
         task.start()
         start_time = time.monotonic()
         warnings_displayed = 0
         while True:
-            if task.poll() == None:
+            if not task.isAlive():
                 break
             if time.monotonic() > start_time + 600 and warning_displayed < 1:
                 print("Warning: mirror task already running for 10 " +
-                    "minutes [mirror: " + str(self) + "]", file=sys.stderr)
+                    "minutes [mirror: " + str(self) + "]", file=sys.stderr,
+                    flush=True)
                 warnings_displayed += 1
             elif time.monotonic() > start_time + 1200 and warning_displayed < 2:
                 print("Warning: mirror task already running for 20 " +
-                    "minutes [mirror: " + str(self) + "]", file=sys.stderr)
+                    "minutes [mirror: " + str(self) + "]", file=sys.stderr,
+                    flush=True)
                 warnings_displayed += 1
             elif time.monotonic() > start_time + 1800 and warning_displayed < 3:
                 print("Error: mirror task already running for 30 " +
                     "minutes [mirror: " + str(self) + "], assuming " +
-                    "it is stuck.", file=sys.stderr)
+                    "it is stuck.", file=sys.stderr, flush=True)
                 sys.exit(1)
-        print("Mirror " + str(self) + " updated.", file=sys.stderr)
+            time.sleep(10)
+        if task.error != None:
+            raise task.error
+        print("Mirror " + str(self) + " was updated.", file=sys.stderr,
+            flush=True)
 
 class MirrorHandler(object):
     def __init__(self, settings):
@@ -399,6 +463,10 @@ class MirrorHandler(object):
         self.mirrors = list()
 
     def run(self):
+        if verbose:
+            print("verbose: " + str(self) + ": initializing mirrors...",
+                file=sys.stderr, flush=True)
+
         # Initialize mirrors:
         for mirror_settings in self.settings:
             if not type(mirror_settings) == dict:
@@ -408,6 +476,10 @@ class MirrorHandler(object):
                     "is of this type instead: " + str(type(mirror_settings)))
             self.mirrors.append(Mirror(mirror_settings))
 
+        if verbose:
+            print("verbose: " + str(self) + ": starting update loop...",
+                file=sys.stderr, flush=True)
+
         # Update mirrors continuously:
         while True:
             for mirror in self.mirrors:
@@ -415,11 +487,14 @@ class MirrorHandler(object):
                     mirror.update()
                 except Exception as e:
                     print("There was an error updating mirror " + str(
-                        mirror) + ": " + str(e), file=sys.stderr)
+                        mirror) + ": " + str(e), file=sys.stderr,
+                        flush=True)
                     traceback.print_exc()
             time.sleep(5)
 
 if __name__ == "__main__":
+    if verbose:
+        print("verbose: launching...", file=sys.stderr, flush=True)
     try:
         settings_str = os.environ["MIRRORS"]
     except KeyError:
@@ -429,6 +504,9 @@ if __name__ == "__main__":
     if not type(settings) == list:
         raise RuntimeError("MIRRORS settings expected to be a list, " +
             "but type is " + str(type(settings)))
-    handler = MirrorHandler()
+    if verbose:
+        print("verbose: settings parsed. length: " + str(len(settings_str)),
+            file=sys.stderr, flush=True)
+    handler = MirrorHandler(settings)
     handler.run()
 
