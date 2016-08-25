@@ -29,6 +29,7 @@
 # those of the authors and should not be interpreted as representing official
 # policies, either expressed or implied, of the FreeBSD Project.
 
+import copy
 import json
 import os
 import subprocess
@@ -79,7 +80,7 @@ class SubprocessHelper(object):
             write_function=write_function, copy_to_regular_stdout_stderr=True)
 
     @staticmethod
-    def _check_output_extended(cmd, shell=False, stdout=None,
+    def _check_output_extended(cmd, shell=False, stdout=None, stdin=None,
             stderr=None, cwd=None, env=None, pty=False, write_function=None,
             copy_to_regular_stdout_stderr=True,
             process_handle_callback=None):
@@ -102,14 +103,14 @@ class SubprocessHelper(object):
         if not pty:
             process = subprocess.Popen(cmd, shell=shell,
                 stdout=actual_stdout, stderr=actual_stderr,
-                cwd=cwd, env=env)
+                stdin=stdin, cwd=cwd, env=env)
         else:
             process = subprocess.Popen([sys.executable,
                 "-c", "import pty\nimport sys\n" +\
                 "exit_code = pty.spawn(sys.argv[1:])\n" +\
                 "sys.exit((int(exit_code) & (255 << 8)) >> 8)"] + cmd,
                 shell=shell,
-                stdout=actual_stdout, stderr=actual_stderr,
+                stdout=actual_stdout, stderr=actual_stderr, stdin=stdin,
                 cwd=cwd, env=env)
         if process_handle_callback != None:
             process_handle_callback(process)
@@ -146,6 +147,7 @@ class SubprocessHelper(object):
                             except TypeError:
                                 self.copy_to.write(c.decode(
                                     "utf-8", "replace"))
+                            self.copy_to.flush()
 
                         # Process writer func:
                         if self.writer_func != None:
@@ -244,6 +246,8 @@ class SubprocessHelper(object):
 
 class Remote(object):
     def __init__(self, url, auth_info, name="origin"):
+        self.show_debug = True
+
         if not type(auth_info) == dict:
             raise RuntimeError("invalid auth info: " +
                 "dictionary expected")
@@ -252,6 +256,46 @@ class Remote(object):
             self.url = self.url.partition("//")[2]
         self.auth = auth_info
         self.name = name
+
+        # Insert username into https:// urls if required for login:
+        if self.url.startswith("https://"):
+            uname = self._relevant_auth_username()
+            if uname != None and self.url.find("@") < 0:
+                self.url = ("https://" + uname + "@" +
+                    self.url[len("https://"):])
+            pw = self._relevant_auth_password()
+            if pw != None and self.url.find("@") > self.url.find(":"):
+                self.url = ("https://" + self.url.partition("@")[0][
+                    len("https://"):] +
+                    ":" + pw + "@" + self.url.partition("@")[2])
+
+    def _relevant_auth_username(self):
+        def uname():
+            if not "type" in self.auth:
+                return None
+            if not "info" in self.auth:
+                return None
+            if self.auth["type"] == "anonymous":
+                return None
+            if not "user" in self.auth["info"]:
+                return None
+            return self.auth["info"]["user"]
+        return uname() or "gitlfsissuperbuggy" # git-lfs issue #1485
+
+    def _relevant_auth_password(self):
+        def pw():
+            if not "type" in self.auth:
+                return None
+            if not "info" in self.auth:
+                return None
+            if self.auth["type"] == "anonymous":
+                return None
+            if self.auth["type"] != "password":
+                return None
+            if not "password" in self.auth["info"]:
+                return None
+            return self.auth["info"]["password"]
+        return pw() or "noneneeded" # git-lfs issue #1485
 
     def set_repo(self, repo):
         self.repo = repo
@@ -269,15 +313,23 @@ class Remote(object):
         subprocess.check_output(["git", "remote", "update"],
             cwd=self.repo.repo_dir)
 
-    def _run_authed_git_command(self, command, binary="git"):
+    def _run_authed_git_command(self, command, binary="git",
+            pw_arg_no=None):
         if verbose:
-            print("verbose: shell cmd: " + str([binary] + command),
+            l = command
+            if pw_arg_no != None and len(pw_arg_no) >= 0 and \
+                    len(pw_arg_no) < len(command):
+                l = copy.copy(command)
+                l[pw_arg_no] = "<retracted>"
+            print("verbose: shell cmd: " + str([binary] + l),
                 file=sys.stderr, flush=True)
         if not "type" in self.auth:
             raise RuntimeError("invalid auth info: no \"type\" specified")
         if self.auth["type"] == "anonymous":
-            output = subprocess.check_output([binary] + command,
-                cwd=self.repo.repo_dir)
+            output = SubprocessHelper._check_output_extended(
+                [binary] + command, pty=True,
+                copy_to_regular_stdout_stderr=self.show_debug,
+                cwd=self.repo.repo_dir, stderr=subprocess.STDOUT)
             return output
         elif self.auth["type"] == "password":
             if not "info" in self.auth:
@@ -294,33 +346,16 @@ class Remote(object):
             if not type(self.auth["info"]["password"]) == str:
                 raise RuntimeError("invalid auth info: " +
                     "specified password must be a string")
-            class PasswordResponder(object):
-                def __init__(self, password):
-                    self.password = password
-                    self.process = None
-                    self.output = ""
-                    self.was_prompted = False
 
-                def process_obj_callback(self, obj):
-                    self.process = obj
-
-                def write_callback(self, c):
-                    self.output += c
-                    if self.was_prompted:
-                        return
-                    if self.output.find("AELRKEARLEARLK") >= 0:
-                        self.was_prompted = True
-                        self.process.stdin.write(self.password + "\n")
-
-            helper_obj = PasswordResponder(
-                self.auth["info"]["password"])
             output = SubprocessHelper._check_output_extended(
                 ["git"] + command, cwd=self.repo.repo_dir,
-                write_function=helper_obj.write_callback,
-                process_handle_callback=helper_obj.process_obj_callback)
+                stderr=subprocess.STDOUT, pty=True,
+                copy_to_regular_stdout_stderr=self.show_debug)
             return output
         elif self.auth["type"] == "public_key":
             raise RuntimeError("not implemented yet")
+        else:
+            raise RuntimeError("unknown auth type")
 
     def pull(self, lfs=False, branch="master"):
         self._run_authed_git_command(["pull", self.name, branch])
@@ -329,7 +364,7 @@ class Remote(object):
                 binary="git-lfs")
 
     def push(self, branch="master"):
-        self._run_authed_git_command(["pull", self.name, branch])
+        self._run_authed_git_command(["push", self.name, branch])
 
 class LocalRepo(object):
     def __init__(self, repo_dir=None, lfs=True):
@@ -398,6 +433,7 @@ class Mirror(object):
         return self.__repr__()
 
     def update(self):
+        print ("-------- STARTING UPDATE OF " + str(self), flush=True)
         class UpdateThread(threading.Thread):
             def __init__(self, mirror):
                 super().__init__()
@@ -410,6 +446,8 @@ class Mirror(object):
                         print("verbose: " + str(self.mirror) +
                             ": pulling from source...",
                             file=sys.stderr, flush=True)
+
+                    # Pull from the source to see if there are new changes:
                     self.mirror.repo.remotes["source"].pull()
                     if (self.mirror._last_known_hash != None and
                             self.mirror.repo.head() ==
@@ -426,11 +464,16 @@ class Mirror(object):
                             ": pushing to target...",
                             file=sys.stderr, flush=True)
 
-                    self.mirror.repo.remotes["target"].push()
+                    # Push changes to the target:
+                    try:
+                        self.mirror.repo.remotes["target"].push()
+                    except Exception as e:
+                        self.mirror._last_known_hash = None
+                        raise e
                     if verbose:
                         print("verbose: " + str(self.mirror) +
                             ": thread work done.",
-                            file=sys.stderr, fluhs=True)
+                            file=sys.stderr, flush=True)
                 except Exception as e:
                     self.error = e
 
@@ -441,17 +484,17 @@ class Mirror(object):
         while True:
             if not task.isAlive():
                 break
-            if time.monotonic() > start_time + 600 and warning_displayed < 1:
+            if time.monotonic() > start_time + 600 and warnings_displayed < 1:
                 print("Warning: mirror task already running for 10 " +
                     "minutes [mirror: " + str(self) + "]", file=sys.stderr,
                     flush=True)
                 warnings_displayed += 1
-            elif time.monotonic() > start_time + 1200 and warning_displayed < 2:
+            elif time.monotonic() > start_time + 1200 and warnings_displayed < 2:
                 print("Warning: mirror task already running for 20 " +
                     "minutes [mirror: " + str(self) + "]", file=sys.stderr,
                     flush=True)
                 warnings_displayed += 1
-            elif time.monotonic() > start_time + 1800 and warning_displayed < 3:
+            elif time.monotonic() > start_time + 1800 and warnings_displayed < 3:
                 print("Error: mirror task already running for 30 " +
                     "minutes [mirror: " + str(self) + "], assuming " +
                     "it is stuck.", file=sys.stderr, flush=True)
@@ -495,7 +538,8 @@ class MirrorHandler(object):
                         mirror) + ": " + str(e), file=sys.stderr,
                         flush=True)
                     traceback.print_exc()
-            time.sleep(5)
+            print ("-------- UPDATES COMPLETE", flush=True)
+            time.sleep(120)
 
 if __name__ == "__main__":
     if verbose:
