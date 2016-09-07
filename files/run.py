@@ -315,47 +315,57 @@ class Remote(object):
 
     def _run_authed_git_command(self, command, binary="git",
             pw_arg_no=None):
-        if verbose:
-            l = command
-            if pw_arg_no != None and len(pw_arg_no) >= 0 and \
-                    len(pw_arg_no) < len(command):
-                l = copy.copy(command)
-                l[pw_arg_no] = "<retracted>"
-            print("verbose: shell cmd: " + str([binary] + l),
-                file=sys.stderr, flush=True)
-        if not "type" in self.auth:
-            raise RuntimeError("invalid auth info: no \"type\" specified")
-        if self.auth["type"] == "anonymous":
-            output = SubprocessHelper._check_output_extended(
-                [binary] + command, pty=True,
-                copy_to_regular_stdout_stderr=self.show_debug,
-                cwd=self.repo.repo_dir, stderr=subprocess.STDOUT)
-            return output
-        elif self.auth["type"] == "password":
-            if not "info" in self.auth:
-                raise RuntimeError("invalid auth info: password auth " +
-                    "requires \"info\" entry with \"password\" specified " +
-                    "inside")
-            if not type(self.auth["info"]) == dict:
-                raise RuntimeError("invalid auth info: \"info\" " +
-                    "entry not a dictionary as expected")
-            if not "password" in self.auth["info"]:
-                raise RuntimeError("invalid auth info: password auth " +
-                    "requires \"password\" specified " +
-                    "inside the \"info\" dictionary")
-            if not type(self.auth["info"]["password"]) == str:
-                raise RuntimeError("invalid auth info: " +
-                    "specified password must be a string")
+        try:
+            if verbose:
+                l = command
+                if pw_arg_no != None and len(pw_arg_no) >= 0 and \
+                        len(pw_arg_no) < len(command):
+                    l = copy.copy(command)
+                    l[pw_arg_no] = "<retracted>"
+                print("verbose: shell cmd: " + str([binary] + l),
+                    file=sys.stderr, flush=True)
+            if not "type" in self.auth:
+                raise RuntimeError("invalid auth info: no \"type\" specified")
+            if self.auth["type"] == "anonymous":
+                output = SubprocessHelper._check_output_extended(
+                    [binary] + command, pty=True,
+                    copy_to_regular_stdout_stderr=self.show_debug,
+                    cwd=self.repo.repo_dir, stderr=subprocess.STDOUT)
+                return output
+            elif self.auth["type"] == "password":
+                if not "info" in self.auth:
+                    raise RuntimeError("invalid auth info: password auth " +
+                        "requires \"info\" entry with " +
+                        "\"password\" specified " +
+                        "inside")
+                if not type(self.auth["info"]) == dict:
+                    raise RuntimeError("invalid auth info: \"info\" " +
+                        "entry not a dictionary as expected")
+                if not "password" in self.auth["info"]:
+                    raise RuntimeError("invalid auth info: password auth " +
+                        "requires \"password\" specified " +
+                        "inside the \"info\" dictionary")
+                if not type(self.auth["info"]["password"]) == str:
+                    raise RuntimeError("invalid auth info: " +
+                        "specified password must be a string")
 
-            output = SubprocessHelper._check_output_extended(
-                ["git"] + command, cwd=self.repo.repo_dir,
-                stderr=subprocess.STDOUT, pty=True,
-                copy_to_regular_stdout_stderr=self.show_debug)
-            return output
-        elif self.auth["type"] == "public_key":
-            raise RuntimeError("not implemented yet")
-        else:
-            raise RuntimeError("unknown auth type")
+                output = SubprocessHelper._check_output_extended(
+                    ["git"] + command, cwd=self.repo.repo_dir,
+                    stderr=subprocess.STDOUT, pty=True,
+                    copy_to_regular_stdout_stderr=self.show_debug)
+                return output
+            elif self.auth["type"] == "public_key":
+                raise RuntimeError("not implemented yet")
+            else:
+                raise RuntimeError("unknown auth type")
+        except subprocess.CalledProcessError as e:
+            print("subprocess.CalledProcessError: an error just occured " +
+                "in _run_authed_git_command.", file=sys.stderr, flush=True)
+            print("subprocess.CalledProcessError: failed command " +
+                "had this output:\n\n" + str(e.output), file=sys.stderr,
+                flush=True)
+            raise e
+                
 
     def branch(self):
         # Fetch newest remote branches:
@@ -401,7 +411,9 @@ class Remote(object):
                 ["git", "checkout", "-b", branch], cwd=self.repo.repo_dir,
                 stderr=subprocess.STDOUT, pty=True,
                 copy_to_regular_stdout_stderr=self.show_debug)
-        assert(self.repo.current_branch == branch)
+        assert(self.repo.current_branch == branch), \
+            ("requiring branch to be '" + branch + "', but it is " +
+            "actually '" + str(self.repo.current_branch) + "'")
 
         # Pull branch:
         self._run_authed_git_command(["pull", self.name, branch])
@@ -426,7 +438,8 @@ class Remote(object):
         assert(self.repo.current_branch == branch)
 
         # Push branch:
-        self._run_authed_git_command(["push", self.name, branch])
+        self._run_authed_git_command(["push",
+            self.name, branch])
 
 class LocalRepo(object):
     def __init__(self, repo_dir=None, lfs=True):
@@ -447,11 +460,30 @@ class LocalRepo(object):
     def current_branch(self):
         try:
             lines = subprocess.check_output(
-                ["git", "branch"], cwd=self.repo_dir)
-        except subprocess.CalledProcessError:
+                ["git", "branch"], cwd=self.repo_dir).decode(
+                "utf-8", "replace").split("\n")
+        except subprocess.CalledProcessError as e:
+            print("Warning: obtaining branch failed with output: \n\n" + str(
+                e.output) + "\n\n --> will return None as branch",
+                file=sys.stderr, flush=True)
             return None
+
+        # Empty master / no commits case:
+        if len(lines) == 1 and len(lines[0]) == 0:
+            # Verify this is truly an empty master:
+            try:
+                output = subprocess.check_output(
+                    ["git", "log"], cwd=self.repo_dir,
+                    stderr=subprocess.STDOUT).decode(
+                    "utf-8", "replace")
+            except subprocess.CalledProcessError as e:
+                output = e.output.decode("utf-8", "replac")
+            if output.startswith("fatal: your current branch 'master"):
+                return "master"
+
+        # Regular branch output check:
         for line in lines:
-            if line.startswith("* "):
+            if line.startswith("* "):  # current branch is marked with star!
                 line = line[2:].strip()
                 return line
         return None
@@ -533,8 +565,12 @@ class Mirror(object):
                             ": detected branches are: " +
                             str(branches))
                     branches.union(set(["master"]))
+                    ordered_branches = list(branches)
+                    if "master" in ordered_branches:
+                        ordered_branches.remove("master")
+                        ordered_branches = [ "master" ] + ordered_branches
 
-                    for branch in branches:
+                    for branch in ordered_branches:
                         # Pull from the source to see if there are new changes:
                         self.mirror.repo.remotes["source"].pull(branch=branch)
                         if (branch in self.mirror._last_known_hash and
@@ -545,7 +581,7 @@ class Mirror(object):
                                     ": nothing to update for branch " +
                                     str(branch) + ", no new commit. "
                                     "Current HEAD: " +
-                                    self.mirror._last_known_hash[branch],
+                                    str(self.mirror._last_known_hash[branch]),
                                     file=sys.stderr, flush=True)
                             # Nothing to forward.
                             continue
@@ -567,7 +603,7 @@ class Mirror(object):
                             self.mirror.repo.remotes["target"].push(
                                 branch=branch)
                         except Exception as e:
-                            self.mirror._last_known_hash = None
+                            self.mirror._last_known_hash[branch] = None
                             raise e
                         if verbose:
                             print("verbose: " + str(self.mirror) +
