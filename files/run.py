@@ -246,7 +246,7 @@ class SubprocessHelper(object):
 
 class Remote(object):
     def __init__(self, url, auth_info, name="origin"):
-        self.show_debug = True
+        self.show_debug = False
 
         if not type(auth_info) == dict:
             raise RuntimeError("invalid auth info: " +
@@ -393,27 +393,37 @@ class Remote(object):
         # Change to branch:
         try:
             SubprocessHelper._check_output_extended(
-                ["git", "checkout", "-b", branch], cwd=self.repo.repo_dir,
+                ["git", "checkout", branch], cwd=self.repo.repo_dir,
                 stderr=subprocess.STDOUT, pty=True,
                 copy_to_regular_stdout_stderr=self.show_debug)
         except subprocess.CalledProcessError:
             SubprocessHelper._check_output_extended(
-                ["git", "checkout",  branch], cwd=self.repo.repo_dir,
+                ["git", "checkout", "-b", branch], cwd=self.repo.repo_dir,
                 stderr=subprocess.STDOUT, pty=True,
                 copy_to_regular_stdout_stderr=self.show_debug)
+        assert(self.repo.current_branch == branch)
 
         # Pull branch:
         self._run_authed_git_command(["pull", self.name, branch])
         if self.repo.lfs:
-            self._run_authed_git_command(["pull", self.name],
+            self._run_authed_git_command(["fetch", self.name],
+                binary="git-lfs")
+            self._run_authed_git_command(["checkout", self.name, branch],
                 binary="git-lfs")
 
     def push(self, branch="master"):
         # Change to branch:
-        SubprocessHelper._check_output_extended(
-            ["git", "checkout", branch], cwd=self.repo.repo_dir,
-            stderr=subprocess.STDOUT, pty=True,
-            copy_to_regular_stdout_stderr=self.show_debug)
+        try:
+            SubprocessHelper._check_output_extended(
+                ["git", "checkout", branch], cwd=self.repo.repo_dir,
+                stderr=subprocess.STDOUT, pty=True,
+                copy_to_regular_stdout_stderr=self.show_debug)
+        except subprocess.CalledProcessError:
+            SubprocessHelper._check_output_extended(
+                ["git", "checkout", "-b", branch], cwd=self.repo.repo_dir,
+                stderr=subprocess.STDOUT, pty=True,
+                copy_to_regular_stdout_stderr=self.show_debug)
+        assert(self.repo.current_branch == branch)
 
         # Push branch:
         self._run_authed_git_command(["push", self.name, branch])
@@ -433,13 +443,27 @@ class LocalRepo(object):
                     "--skip-smudge"],
                     cwd=self.repo_dir)
 
+    @property
+    def current_branch(self):
+        try:
+            lines = subprocess.check_output(
+                ["git", "branch"], cwd=self.repo_dir)
+        except subprocess.CalledProcessError:
+            return None
+        for line in lines:
+            if line.startswith("* "):
+                line = line[2:].strip()
+                return line
+        return None
+
     def head(self, branch="master"):
         try:
             subprocess.check_output(
-                ["git", "checkout", "-b", branch], cwd=self.repo_dir)
+                ["git", "checkout", branch], cwd=self.repo_dir)
         except subprocess.CalledProcessError:
             subprocess.check_output(
-                ["git", "checkout", branch], cwd=self.repo_dir)
+                ["git", "checkout", "-b", branch], cwd=self.repo_dir)
+        assert(self.current_branch == branch)
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
             cwd=self.repo_dir).strip()
@@ -511,13 +535,6 @@ class Mirror(object):
                     branches.union(set(["master"]))
 
                     for branch in branches:
-                        print ("Updating branch: " + str(branch), flush=True) 
-                        if verbose:
-                            print("verbose: " + str(self.mirror) +
-                                ": pulling branch " + str(branch) +
-                                " from source...",
-                                file=sys.stderr, flush=True)
-
                         # Pull from the source to see if there are new changes:
                         self.mirror.repo.remotes["source"].pull(branch=branch)
                         if (branch in self.mirror._last_known_hash and
@@ -526,12 +543,17 @@ class Mirror(object):
                             if verbose:
                                 print("verbose: " + str(self.mirror) +
                                     ": nothing to update for branch " +
-                                    str(branch) + ", no new commit.",
+                                    str(branch) + ", no new commit. "
+                                    "Current HEAD: " +
+                                    self.mirror._last_known_hash[branch],
                                     file=sys.stderr, flush=True)
                             # Nothing to forward.
                             continue
                         self.mirror._last_known_hash[branch] = \
                             self.mirror.repo.head(branch=branch)
+                        print(str(self.mirror) + ": branch " + str(branch) +
+                            ": has NEW HEAD [" + str(branch) + "]: " + str(
+                            self.mirror._last_known_hash[branch]))
                         if verbose:
                             print("verbose: " + str(self.mirror) +
                                 ": pushing branch " + str(branch) +
@@ -539,6 +561,8 @@ class Mirror(object):
                                 file=sys.stderr, flush=True)
 
                         # Push changes to the target:
+                        print(str(self.mirror) + ": branch " + str(branch) +
+                            ": pushing update...")
                         try:
                             self.mirror.repo.remotes["target"].push(
                                 branch=branch)
