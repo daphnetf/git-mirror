@@ -369,10 +369,15 @@ class Remote(object):
 
     def branch(self):
         # Fetch newest remote branches:
-        SubprocessHelper._check_output_extended(
-            ["git", "fetch", self.name], cwd=self.repo.repo_dir,
-            stderr=subprocess.STDOUT, pty=True,
-            copy_to_regular_stdout_stderr=self.show_debug)
+        try:
+            SubprocessHelper._check_output_extended(
+                ["git", "fetch", self.name], cwd=self.repo.repo_dir,
+                stderr=subprocess.STDOUT, pty=True,
+                copy_to_regular_stdout_stderr=self.show_debug)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError("unexpected failure of: " +
+                "git fetch " + self.name + "  (repo: " +
+                self.repo_dir + ") OUTPUT: " + str(e.output))
 
         # List all branches:
         branches = set()
@@ -528,8 +533,11 @@ class Mirror(object):
         if verbose:
             print("verbose: " + str(self) + ": adding source remote...",
                 file=sys.stderr, flush=True)
-        self.repo.add_remote(Remote(self.settings["source"]["url"],
-            self.settings["source"]["auth"], "source"))
+        try:
+            self.repo.add_remote(Remote(self.settings["source"]["url"],
+                self.settings["source"]["auth"], "source"))
+        except (RuntimeError, subprocess.CalledProcessError) as e:
+            raise RuntimeError("add_remote failed: " + str(e))
         if verbose:
             print("verbose: " + str(self) + ": adding target remote...",
                 file=sys.stderr, flush=True)
@@ -653,11 +661,25 @@ class MirrorHandler(object):
         # Initialize mirrors:
         for mirror_settings in self.settings:
             if not type(mirror_settings) == dict:
-                raise RuntimeError("mirror settings have to be a list of " +
-                    "dictionaries which contain the settings for each " +
-                    "respective git mirror, but found a list entry that " +
-                    "is of this type instead: " + str(type(mirror_settings)))
-            self.mirrors.append(Mirror(mirror_settings))
+                raise RuntimeError(
+                    "mirror settings have to be a list of " +
+                    "dictionaries which contain the settings " +
+                    "for each " +
+                    "respective git mirror, but found a list " +
+                    "entry that " +
+                    "is of this type instead: " +
+                    str(type(mirror_settings)))
+            try:
+                self.mirrors.append(Mirror(mirror_settings))
+            except Exception as e:
+                print("FAILED to add mirror: " +
+                    mirror_settings["source"]["url"] + " -> " +
+                    mirror_settings["target"]["url"] +
+                    "  - This mirror will NOT be synced until " +
+                    "restart. " +
+                    "Error details: " +
+                    str(e),
+                    file=sys.stderr, flush=True)
 
         if verbose:
             print("verbose: " + str(self) + ": starting update loop...",
