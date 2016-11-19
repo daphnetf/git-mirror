@@ -377,7 +377,7 @@ class Remote(object):
         except subprocess.CalledProcessError as e:
             raise RuntimeError("unexpected failure of: " +
                 "git fetch " + self.name + "  (repo: " +
-                self.repo_dir + ") OUTPUT: " + str(e.output))
+                self.repo.repo_dir + ") OUTPUT: " + str(e.output))
 
         # List all branches:
         branches = set()
