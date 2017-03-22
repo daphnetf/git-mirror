@@ -467,6 +467,18 @@ class Remote(object):
             except AttributeError:
                 pass
             if output.lower().find("error downloading object") >= 0:
+                if not self.repo.lfs:
+                    print("****************************************",
+                        file=sys.stderr, flush=True)
+                    print("error: !!! MISCONFIGURED REPO !!! " +
+                        "LFS error was encountered, but repo was " +
+                        "configured with lfs:false. Correct your config " +
+                        "and recreate the gitmirror container, and " +
+                        "this error should go away.",
+                        file=sys.stderr, flush=True)
+                    print("****************************************",
+                        file=sys.stderr, flush=True)
+                    raise e
                 print("error: LFS object download failed during " +
                     "branch checkout, aborting by propagating " +
                     "subprocess.CalledProcessError...",
