@@ -245,8 +245,9 @@ class SubprocessHelper(object):
             pty=True, copy_to_regular_stdout_stderr=False)
 
 class Remote(object):
-    def __init__(self, url, auth_info, name="origin"):
+    def __init__(self, url, auth_info, name="origin", verbose=False):
         self.show_debug = False
+        self.verbose = verbose
 
         if not type(auth_info) == dict:
             raise RuntimeError("invalid auth info: " +
@@ -280,7 +281,7 @@ class Remote(object):
             if not "user" in self.auth["info"]:
                 return None
             return self.auth["info"]["user"]
-        return uname() or "gitlfsissuperbuggy" # git-lfs issue #1485
+        return uname()
 
     def _relevant_auth_password(self):
         def pw():
@@ -295,10 +296,13 @@ class Remote(object):
             if not "password" in self.auth["info"]:
                 return None
             return self.auth["info"]["password"]
-        return pw() or "noneneeded" # git-lfs issue #1485
+        return pw()
 
     def set_repo(self, repo):
         self.repo = repo
+        if self.verbose:
+            print("verbose: shell cmd: ['git', 'remote']",
+                file=sys.stderr, flush=True)
         remote_list_output = subprocess.check_output(["git", "remote"],
             cwd=self.repo.repo_dir)
         lines = [line.strip().decode("utf-8", "replace")\
@@ -308,8 +312,15 @@ class Remote(object):
         if self.name in remotes:
             # Nothing to do, remote was already added.
             return
+        if self.verbose:
+            print("verbose: shell cmd: ['git', 'remote', 'add', '" +
+                self.name + "', '" + self.url + "']",
+                file=sys.stderr, flush=True)
         subprocess.check_output(["git", "remote", "add", self.name,
             self.url], cwd=self.repo.repo_dir)
+        if self.verbose:
+            print("verbose: shell cmd: ['git', 'remote', 'update']",
+                file=sys.stderr, flush=True)
         subprocess.check_output(["git", "remote", "update"],
             cwd=self.repo.repo_dir)
 
@@ -361,15 +372,25 @@ class Remote(object):
         except subprocess.CalledProcessError as e:
             print("subprocess.CalledProcessError: an error just occured " +
                 "in _run_authed_git_command.", file=sys.stderr, flush=True)
+            output = e.output
+            try:
+                output = output.decode("utf-8", "replace")
+            except AttributeError:
+                pass
             print("subprocess.CalledProcessError: failed command " +
-                "had this output:\n\n" + str(e.output), file=sys.stderr,
+                "had this output:\n\n" + output, file=sys.stderr,
                 flush=True)
+            e.output = output
             raise e
                 
 
     def branch(self):
         # Fetch newest remote branches:
         try:
+            if self.verbose:
+                print("verbose: shell cmd: ['git', 'fetch', '" +
+                    self.name + "']",
+            file=sys.stderr, flush=True)
             SubprocessHelper._check_output_extended(
                 ["git", "fetch", self.name], cwd=self.repo.repo_dir,
                 stderr=subprocess.STDOUT, pty=True,
@@ -398,20 +419,52 @@ class Remote(object):
             branches.add(l.rpartition("/")[2])
         return branches
 
-    def pull(self, lfs=False, branch="master"):
+    def pull(self, lfs=False, branch="master", require_clean_status=False):
         # Fetch newest remote branches:
+        if self.verbose:
+            print("verbose: shell cmd: ['git', 'fetch', '" +
+                self.name + "']",
+                file=sys.stderr, flush=True)
         SubprocessHelper._check_output_extended(
             ["git", "fetch", self.name], cwd=self.repo.repo_dir,
             stderr=subprocess.STDOUT, pty=True,
             copy_to_regular_stdout_stderr=self.show_debug)
 
+        # Make sure git status is clean:
+        if require_clean_status:
+            s = subprocess.check_output([
+                "git", "status", "-s"],
+                cwd=self.repo.repo_dir)
+            try:
+                s = s.decode('utf-8', 'replace')
+            except AttributeError:
+                pass
+            if len(s.strip()) > 0:
+                raise RuntimeError("required a clean 'git status' for " +
+                    "pull, but " +
+                    "'git status' is not clean: " + str(s.strip()))
+            elif self.verbose:
+                print("verbose: pull clean status check (1): " +
+                    "repo status is clean / no 'git status' contents",
+                    file=sys.stderr, flush=True)
+
         # Change to branch:
         try:
+            if self.verbose:
+                print("verbose: shell cmd: ['git', 'checkout', '" +
+                    branch + "']   (branch change to: " +
+                    branch + ")",
+                    file=sys.stderr, flush=True)
             SubprocessHelper._check_output_extended(
                 ["git", "checkout", branch], cwd=self.repo.repo_dir,
                 stderr=subprocess.STDOUT, pty=True,
                 copy_to_regular_stdout_stderr=self.show_debug)
         except subprocess.CalledProcessError:
+            if self.verbose:
+                print("verbose: shell cmd: ['git', 'checkout', '-b', '" +
+                    branch + "']   (branch change to: " +
+                    branch + ")",
+                    file=sys.stderr, flush=True)
             SubprocessHelper._check_output_extended(
                 ["git", "checkout", "-b", branch], cwd=self.repo.repo_dir,
                 stderr=subprocess.STDOUT, pty=True,
@@ -419,12 +472,42 @@ class Remote(object):
         assert(self.repo.current_branch == branch), \
             ("requiring branch to be '" + branch + "', but it is " +
             "actually '" + str(self.repo.current_branch) + "'")
+        if self.verbose:
+            print("verbose: branch is now " + str(branch))
+
+        # Make sure git status is clean (again):
+        if require_clean_status:
+            s = subprocess.check_output([
+                "git", "status", "-s"],
+                cwd=self.repo.repo_dir)
+            try:
+                s = s.decode('utf-8', 'replace')
+            except AttributeError:
+                pass
+            if len(s.strip()) > 0:
+                raise RuntimeError("required a clean 'git status' for " +
+                    "pull, but " +
+                    "'git status' is not clean: " + str(s.strip()))
+            elif self.verbose:
+                print("verbose: pull clean status check (2): " +
+                    "repo status is clean / no 'git status' contents",
+                    file=sys.stderr, flush=True)
 
         # Pull branch:
         self._run_authed_git_command(["pull", self.name, branch])
         if self.repo.lfs:
-            self._run_authed_git_command(["fetch", self.name],
-                binary="git-lfs")
+            retry = True
+            while retry:
+                retry = False
+                try:
+                    self._run_authed_git_command(["fetch", "--all"],
+                        binary="git-lfs")
+                except subprocess.CalledProcessError as e:
+                    if e.output.find("connection reset by peer") >= 0:
+                        print("CONNECTION RESET BY PEER DETECTED, " +
+                            "RETRYING...")
+                        time.sleep(10)
+                        retry = True 
             self._run_authed_git_command(["checkout", self.name, branch],
                 binary="git-lfs")
 
@@ -447,23 +530,46 @@ class Remote(object):
             self.name, branch])
 
 class LocalRepo(object):
-    def __init__(self, repo_dir=None, lfs=True):
+    def __init__(self, repo_dir=None, lfs=True, verbose=False):
+        self.verbose = verbose
         if repo_dir == None:
             repo_dir = tempfile.mkdtemp(prefix="git-mirror-temp-repo-")
         self.repo_dir = repo_dir
         self.remotes = dict()
         self.lfs = lfs
         if not os.path.exists(os.path.join(self.repo_dir, ".git")):
+            if self.verbose:
+                print("verbose: shell cmd: git init .",
+                    file=sys.stderr, flush=True)
             subprocess.check_output(["git", "init", "."],
                 cwd=self.repo_dir)
             if self.lfs:
+                if self.verbose:
+                    print("verbose: shell cmd: git lfs install --skip-smudge",
+                        file=sys.stderr, flush=True)
                 subprocess.check_output(["git", "lfs", "install",
                     "--skip-smudge"],
                     cwd=self.repo_dir)
+        if self.verbose:
+            git_status_s = subprocess.check_output(["git", "status", "-s"],
+                cwd=self.repo_dir)
+            try:
+                git_status_s = git_status_s.decode("utf-8", "replace")
+            except AttributeError:
+                pass
+            print("verbose: local repo init: LocalRepo(repo_dir=" +
+                str(self.repo_dir) + ")  -- " +
+                str(len(os.listdir(self.repo_dir))) + " files, " +
+                "git status: " + (
+                "UNCLEAN" if len(git_status_s.strip()) > 0 else \
+                "CLEAN"))
 
     @property
     def current_branch(self):
         try:
+            if self.verbose:
+                print("verbose: shell cmd: git branch",
+                    file=sys.stderr, flush=True)
             lines = subprocess.check_output(
                 ["git", "branch"], cwd=self.repo_dir).decode(
                 "utf-8", "replace").split("\n")
@@ -477,6 +583,9 @@ class LocalRepo(object):
         if len(lines) == 1 and len(lines[0]) == 0:
             # Verify this is truly an empty master:
             try:
+                if self.verbose:
+                    print("verbose: shell cmd: git log",
+                        file=sys.stderr, flush=True)
                 output = subprocess.check_output(
                     ["git", "log"], cwd=self.repo_dir,
                     stderr=subprocess.STDOUT).decode(
@@ -495,9 +604,15 @@ class LocalRepo(object):
 
     def head(self, branch="master"):
         try:
+            if self.verbose:
+                print("verbose: shell cmd: git checkout " + branch,
+                    file=sys.stderr, flush=True)
             subprocess.check_output(
                 ["git", "checkout", branch], cwd=self.repo_dir)
         except subprocess.CalledProcessError:
+            if self.verbose:
+                print("verbose: shell cmd: git checkout -b " + branch,
+                    file=sys.stderr, flush=True)
             subprocess.check_output(
                 ["git", "checkout", "-b", branch], cwd=self.repo_dir)
         assert(self.current_branch == branch)
@@ -528,21 +643,23 @@ class Mirror(object):
         if "lfs" in self.settings:
             if self.settings["lfs"]:
                 use_lfs = True
-        self.repo = LocalRepo(lfs=use_lfs)
+        self.repo = LocalRepo(lfs=use_lfs, verbose=verbose)
 
         if verbose:
             print("verbose: " + str(self) + ": adding source remote...",
                 file=sys.stderr, flush=True)
         try:
             self.repo.add_remote(Remote(self.settings["source"]["url"],
-                self.settings["source"]["auth"], "source"))
+                self.settings["source"]["auth"], "source",
+                verbose=verbose))
         except (RuntimeError, subprocess.CalledProcessError) as e:
             raise RuntimeError("add_remote failed: " + str(e))
         if verbose:
             print("verbose: " + str(self) + ": adding target remote...",
                 file=sys.stderr, flush=True)
         self.repo.add_remote(Remote(self.settings["target"]["url"],
-            self.settings["target"]["auth"], "target"))
+            self.settings["target"]["auth"], "target",
+            verbose=verbose))
 
     def __repr__(self):
         if hasattr(self, "settings"):
@@ -580,7 +697,8 @@ class Mirror(object):
 
                     for branch in ordered_branches:
                         # Pull from the source to see if there are new changes:
-                        self.mirror.repo.remotes["source"].pull(branch=branch)
+                        self.mirror.repo.remotes["source"].pull(branch=branch,
+                            require_clean_status=True)
                         if (branch in self.mirror._last_known_hash and
                                 self.mirror.repo.head(branch=branch) ==
                                     self.mirror._last_known_hash[branch]):
