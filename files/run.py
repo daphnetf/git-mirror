@@ -419,6 +419,18 @@ class Remote(object):
             branches.add(l.rpartition("/")[2])
         return branches
 
+    def is_clean(self):
+        s = subprocess.check_output([
+            "git", "status", "-s"],
+            cwd=self.repo.repo_dir)
+        try:
+            s = s.decode('utf-8', 'replace')
+        except AttributeError:
+            pass
+        if len(s.strip()) > 0:
+            return False
+        return True
+
     def pull(self, lfs=False, branch="master", require_clean_status=False):
         # Fetch newest remote branches:
         if self.verbose:
@@ -431,22 +443,10 @@ class Remote(object):
             copy_to_regular_stdout_stderr=self.show_debug)
 
         # Make sure git status is clean:
-        if require_clean_status:
-            s = subprocess.check_output([
-                "git", "status", "-s"],
-                cwd=self.repo.repo_dir)
-            try:
-                s = s.decode('utf-8', 'replace')
-            except AttributeError:
-                pass
-            if len(s.strip()) > 0:
-                raise RuntimeError("required a clean 'git status' for " +
-                    "pull, but " +
-                    "'git status' is not clean: " + str(s.strip()))
-            elif self.verbose:
-                print("verbose: pull clean status check (1): " +
-                    "repo status is clean / no 'git status' contents",
-                    file=sys.stderr, flush=True)
+        if require_clean_status and not self.is_clean():
+            raise RuntimeError("required a clean 'git status' for " +
+                "pull, but " +
+                "'git status' is not clean! (check 1)")
 
         # Change to branch:
         try:
@@ -459,39 +459,56 @@ class Remote(object):
                 ["git", "checkout", branch], cwd=self.repo.repo_dir,
                 stderr=subprocess.STDOUT, pty=True,
                 copy_to_regular_stdout_stderr=self.show_debug)
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as e:
+            # Check for LFS error:
+            output = e.output
+            try:
+                output = output.decode("utf-8", "replace")
+            except AttributeError:
+                pass
+            if output.lower().find("error downloading object") >= 0:
+                print("error: LFS object download failed during " +
+                    "branch checkout, aborting by propagating " +
+                    "subprocess.CalledProcessError...",
+                    file=sys.stderr, flush=True)
+                raise e
+
+            # Make sure 'git status' is still clean if required:
+            if require_clean_status and not self.is_clean():
+                raise RuntimeError("required a clean 'git status' for " +
+                    "pull, but " +
+                    "'git status' is not clean! (check 2) " +
+                    "Checkout command output is: " + str(e.output))
+
+            # Try checkout with creating new branch:
             if self.verbose:
                 print("verbose: shell cmd: ['git', 'checkout', '-b', '" +
                     branch + "']   (branch change to: " +
                     branch + ")",
                     file=sys.stderr, flush=True)
-            SubprocessHelper._check_output_extended(
+            o = SubprocessHelper._check_output_extended(
                 ["git", "checkout", "-b", branch], cwd=self.repo.repo_dir,
                 stderr=subprocess.STDOUT, pty=True,
                 copy_to_regular_stdout_stderr=self.show_debug)
+            
+            # Make sure 'git status' is still clean if required:
+            if require_clean_status and not self.is_clean():
+                raise RuntimeError("required a clean 'git status' for " +
+                    "pull, but " +
+                    "'git status' is not clean! (check 3) " +
+                    "Checkout command output is: " + str(o)) 
         assert(self.repo.current_branch == branch), \
             ("requiring branch to be '" + branch + "', but it is " +
             "actually '" + str(self.repo.current_branch) + "'")
         if self.verbose:
-            print("verbose: branch is now " + str(branch))
+            print("verbose: branch is now " + str(branch),
+                flush=True)
 
         # Make sure git status is clean (again):
-        if require_clean_status:
-            s = subprocess.check_output([
-                "git", "status", "-s"],
-                cwd=self.repo.repo_dir)
-            try:
-                s = s.decode('utf-8', 'replace')
-            except AttributeError:
-                pass
-            if len(s.strip()) > 0:
-                raise RuntimeError("required a clean 'git status' for " +
-                    "pull, but " +
-                    "'git status' is not clean: " + str(s.strip()))
-            elif self.verbose:
-                print("verbose: pull clean status check (2): " +
-                    "repo status is clean / no 'git status' contents",
-                    file=sys.stderr, flush=True)
+        if require_clean_status and not self.is_clean():
+            raise RuntimeError("required a clean 'git status' for " +
+                "pull, but " +
+                "'git status' is not clean! (check 4)") 
 
         # Pull branch:
         self._run_authed_git_command(["pull", self.name, branch])
@@ -697,8 +714,22 @@ class Mirror(object):
 
                     for branch in ordered_branches:
                         # Pull from the source to see if there are new changes:
-                        self.mirror.repo.remotes["source"].pull(branch=branch,
-                            require_clean_status=True)
+                        try:
+                            self.mirror.repo.remotes["source"].pull(
+                                branch=branch,
+                                require_clean_status=True)
+                        except subprocess.CalledProcessError as e:
+                            o = e.output
+                            try:
+                                o = o.decode("utf-8", "replace")
+                            except AttributeError:
+                                pass
+                            print("error: failed to pull mirror: " +
+                                "encountered error: " + str(e) + "\n" +
+                                "  - command output was:\n" +
+                                "     " + "     ".join(o.split("\n")),
+                                file=sys.stderr, flush=True)
+                            raise e
                         if (branch in self.mirror._last_known_hash and
                                 self.mirror.repo.head(branch=branch) ==
                                     self.mirror._last_known_hash[branch]):
