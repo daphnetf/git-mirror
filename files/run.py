@@ -529,7 +529,8 @@ class Remote(object):
             while retry:
                 retry = False
                 try:
-                    self._run_authed_git_command(["fetch", "--all"],
+                    self._run_authed_git_command(["fetch", "--all",
+                        self.name],
                         binary="git-lfs")
                 except subprocess.CalledProcessError as e:
                     if e.output.find("connection reset by peer") >= 0:
